@@ -1,0 +1,34 @@
+name: Revisar textos de Habbo
+
+on:
+  schedule:
+    - cron: "*/5 * * * *"
+  workflow_dispatch:   # permite ejecutarlo a mano desde la pestaña Actions
+
+permissions:
+  contents: write
+
+concurrency:
+  group: habbo-textos
+  cancel-in-progress: false
+
+jobs:
+  revisar:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Ejecutar script
+        env:
+          DISCORD_WEBHOOK: ${{ secrets.DISCORD_WEBHOOK }}
+        run: python3 check_textos.py
+
+      - name: Guardar cambios en el repositorio
+        run: |
+          if [ -n "$(git status --porcelain external_flash_texts.txt)" ]; then
+            git config user.name "github-actions[bot]"
+            git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+            git add external_flash_texts.txt
+            git commit -m "Actualizar textos de Habbo"
+            git push
+          fi
