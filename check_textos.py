@@ -4,12 +4,16 @@ import time
 import json
 import urllib.request
 import urllib.error
+from urllib.parse import quote
 
 URL = "https://www.habbo.es/gamedata/external_flash_texts/1"
 TXT_FILE = "external_flash_texts.txt"      # copia guardada en el repositorio
 WEBHOOK = os.environ.get("DISCORD_WEBHOOK")
-MAX_MENSAJES = 15                          # tope de mensajes por ejecución
-MAX_VALOR = 500                            # largo máximo de cada texto mostrado
+MAX_MENSAJES = 40                          # tope de mensajes por ejecución
+
+# Insignias: para claves "badge_name_CODIGO" se muestra esta imagen
+PREFIJO_INSIGNIA = "badge_name_"
+URL_INSIGNIA = "https://images.habbo.com/c_images/album1584/{codigo}.png"
 
 
 def descargar() -> str:
@@ -30,27 +34,44 @@ def parse(texto: str) -> dict:
     return datos
 
 
-def recortar(s: str, limite: int = MAX_VALOR) -> str:
-    return s if len(s) <= limite else s[: limite - 3] + "..."
+def limpiar(s: str) -> str:
+    # Evita que el texto cierre por error el bloque de código de Discord
+    return s.replace("```", "'''")
 
 
-def trocear(entradas, limite=1800):
-    """Agrupa entradas (cada una puede tener varias líneas) en mensajes seguros."""
+def piezas(linea: str, prefijo: str = "", limite: int = 1700):
+    """Divide una línea larga en varias para que nunca se recorte el texto."""
+    linea = limpiar(linea)
+    n = limite - len(prefijo)
+    if not linea:
+        return [prefijo.rstrip()]
+    return [prefijo + linea[i:i + n] for i in range(0, len(linea), n)]
+
+
+def trocear(lineas, limite=1800):
+    """Agrupa líneas en mensajes que no superen el límite de Discord."""
     bloque, largo = [], 0
-    for e in entradas:
-        if len(e) > limite:
-            e = e[: limite - 3] + "..."
-        if largo + len(e) + 2 > limite and bloque:
-            yield "\n\n".join(bloque)
+    for l in lineas:
+        if largo + len(l) + 1 > limite and bloque:
+            yield "\n".join(bloque).strip("\n")
             bloque, largo = [], 0
-        bloque.append(e)
-        largo += len(e) + 2
+        bloque.append(l)
+        largo += len(l) + 1
     if bloque:
-        yield "\n\n".join(bloque)
+        yield "\n".join(bloque).strip("\n")
 
 
-def enviar(contenido: str):
-    data = json.dumps({"content": contenido}).encode("utf-8")
+def embed_insignia(clave: str, valor: str, estado: str) -> dict:
+    codigo = clave[len(PREFIJO_INSIGNIA):]
+    return {
+        "title": codigo[:256],
+        "description": f"{estado}: {valor}"[:300],
+        "image": {"url": URL_INSIGNIA.format(codigo=quote(codigo, safe=""))},
+    }
+
+
+def enviar(payload: dict):
+    data = json.dumps(payload).encode("utf-8")
     req = urllib.request.Request(
         WEBHOOK,
         data=data,
@@ -87,30 +108,45 @@ def main():
     with open(TXT_FILE, "r", encoding="utf-8") as f:
         anteriores = parse(f.read())
 
-    añadidos = [f"{k}={recortar(v, 1500)}" for k, v in nuevos.items() if k not in anteriores]
+    lineas_nuevos, n_nuevos = [], 0
+    lineas_mod, n_mod = [], 0
+    embeds = []  # imágenes de insignias
 
-    # Entradas con el antes (-) y el después (+)
-    modificados = [
-        f"@@ {k} @@\n- {recortar(anteriores[k])}\n+ {recortar(v)}"
-        for k, v in nuevos.items()
-        if k in anteriores and anteriores[k] != v
-    ]
+    for k, v in nuevos.items():
+        if k not in anteriores:
+            n_nuevos += 1
+            lineas_nuevos += piezas(f"{k}={v}")
+            if k.startswith(PREFIJO_INSIGNIA):
+                embeds.append(embed_insignia(k, v, "🆕 Nuevo"))
+        elif anteriores[k] != v:
+            n_mod += 1
+            lineas_mod.append(f"@@ {limpiar(k)} @@")
+            lineas_mod += piezas(anteriores[k], "- ")
+            lineas_mod += piezas(v, "+ ")
+            lineas_mod.append("")
+            if k.startswith(PREFIJO_INSIGNIA):
+                embeds.append(embed_insignia(k, v, "✏️ Modificado"))
 
-    if not añadidos and not modificados:
+    if not n_nuevos and not n_mod:
         print("Sin cambios.")
         return
 
-    mensajes = []
-    if añadidos:
-        mensajes.append(f"🆕 **{len(añadidos)} texto(s) nuevo(s):**")
-        mensajes += [f"```\n{p}\n```" for p in trocear(añadidos)]
-    if modificados:
-        mensajes.append(f"✏️ **{len(modificados)} texto(s) modificado(s)** (antes `-` / después `+`):")
-        mensajes += [f"```diff\n{p}\n```" for p in trocear(modificados)]
+    mensajes = []  # cada elemento es un payload de webhook
+    if n_nuevos:
+        mensajes.append({"content": f"🆕 **{n_nuevos} texto(s) nuevo(s):**"})
+        mensajes += [{"content": f"```\n{p}\n```"} for p in trocear(lineas_nuevos) if p.strip()]
+    if n_mod:
+        mensajes.append({"content": f"✏️ **{n_mod} texto(s) modificado(s)** (antes `-` / después `+`):"})
+        mensajes += [{"content": f"```diff\n{p}\n```"} for p in trocear(lineas_mod) if p.strip()]
+    if embeds:
+        mensajes.append({"content": f"🏅 **{len(embeds)} insignia(s):**"})
+        # Discord permite hasta 10 embeds por mensaje
+        for i in range(0, len(embeds), 10):
+            mensajes.append({"embeds": embeds[i:i + 10]})
 
     if len(mensajes) > MAX_MENSAJES:
         omitidos = len(mensajes) - MAX_MENSAJES
-        mensajes = mensajes[:MAX_MENSAJES] + [f"… y {omitidos} mensaje(s) más omitidos."]
+        mensajes = mensajes[:MAX_MENSAJES] + [{"content": f"… y {omitidos} mensaje(s) más omitidos."}]
 
     for m in mensajes:
         enviar(m)
@@ -118,7 +154,7 @@ def main():
     # Solo se guarda si el aviso salió bien
     with open(TXT_FILE, "w", encoding="utf-8") as f:
         f.write(nuevo_texto)
-    print(f"Avisados {len(añadidos)} nuevos y {len(modificados)} modificados.")
+    print(f"Avisados {n_nuevos} nuevos y {n_mod} modificados ({len(embeds)} insignias).")
 
 
 if __name__ == "__main__":
