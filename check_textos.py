@@ -9,6 +9,7 @@ URL = "https://www.habbo.es/gamedata/external_flash_texts/1"
 TXT_FILE = "external_flash_texts.txt"      # copia guardada en el repositorio
 WEBHOOK = os.environ.get("DISCORD_WEBHOOK")
 MAX_MENSAJES = 15                          # tope de mensajes por ejecución
+MAX_VALOR = 500                            # largo máximo de cada texto mostrado
 
 
 def descargar() -> str:
@@ -22,7 +23,6 @@ def descargar() -> str:
 def parse(texto: str) -> dict:
     datos = {}
     for linea in texto.splitlines():
-        linea = linea.strip()
         if "=" not in linea:
             continue
         clave, valor = linea.split("=", 1)
@@ -30,18 +30,23 @@ def parse(texto: str) -> dict:
     return datos
 
 
-def trocear(lineas, limite=1850):
+def recortar(s: str, limite: int = MAX_VALOR) -> str:
+    return s if len(s) <= limite else s[: limite - 3] + "..."
+
+
+def trocear(entradas, limite=1800):
+    """Agrupa entradas (cada una puede tener varias líneas) en mensajes seguros."""
     bloque, largo = [], 0
-    for l in lineas:
-        if len(l) > limite:
-            l = l[: limite - 3] + "..."
-        if largo + len(l) + 1 > limite and bloque:
-            yield "\n".join(bloque)
+    for e in entradas:
+        if len(e) > limite:
+            e = e[: limite - 3] + "..."
+        if largo + len(e) + 2 > limite and bloque:
+            yield "\n\n".join(bloque)
             bloque, largo = [], 0
-        bloque.append(l)
-        largo += len(l) + 1
+        bloque.append(e)
+        largo += len(e) + 2
     if bloque:
-        yield "\n".join(bloque)
+        yield "\n\n".join(bloque)
 
 
 def enviar(contenido: str):
@@ -82,9 +87,14 @@ def main():
     with open(TXT_FILE, "r", encoding="utf-8") as f:
         anteriores = parse(f.read())
 
-    añadidos = [f"{k}={v}" for k, v in nuevos.items() if k not in anteriores]
-    modificados = [f"{k}={v}" for k, v in nuevos.items()
-                   if k in anteriores and anteriores[k] != v]
+    añadidos = [f"{k}={recortar(v, 1500)}" for k, v in nuevos.items() if k not in anteriores]
+
+    # Entradas con el antes (-) y el después (+)
+    modificados = [
+        f"@@ {k} @@\n- {recortar(anteriores[k])}\n+ {recortar(v)}"
+        for k, v in nuevos.items()
+        if k in anteriores and anteriores[k] != v
+    ]
 
     if not añadidos and not modificados:
         print("Sin cambios.")
@@ -95,8 +105,8 @@ def main():
         mensajes.append(f"🆕 **{len(añadidos)} texto(s) nuevo(s):**")
         mensajes += [f"```\n{p}\n```" for p in trocear(añadidos)]
     if modificados:
-        mensajes.append(f"✏️ **{len(modificados)} texto(s) modificado(s):**")
-        mensajes += [f"```\n{p}\n```" for p in trocear(modificados)]
+        mensajes.append(f"✏️ **{len(modificados)} texto(s) modificado(s)** (antes `-` / después `+`):")
+        mensajes += [f"```diff\n{p}\n```" for p in trocear(modificados)]
 
     if len(mensajes) > MAX_MENSAJES:
         omitidos = len(mensajes) - MAX_MENSAJES
